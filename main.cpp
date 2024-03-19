@@ -6,6 +6,7 @@
 #include <syslog.h>
 #include <sys/inotify.h>
 #include <shared_mutex>
+#include <list>
 
 #include "app/stacktrace.h"
 #include "app/thread_pool.h"
@@ -85,7 +86,96 @@ inline std::string format(const std::string fmt, ...) {
 
 }
 
-class Application {
+class Watcher
+{
+public:
+    Watcher() {
+        m_fd = inotify_init();
+
+        if ( m_fd < 0 ) {
+            throw std::runtime_error("Cannot initialize inotify");
+        }
+    }
+    Watcher operator=(const Watcher&) = delete;
+
+    ~Watcher() {
+        for (auto& wd: m_wds) {
+            inotify_rm_watch( m_fd, wd );
+        }
+        close( m_fd );
+    }
+
+    void AddWatch(const std::string& path) {
+        int wd = inotify_add_watch(m_fd, path.c_str(), IN_DELETE | IN_CREATE | IN_MODIFY);
+        if ( wd < 0 ) {
+            throw std::runtime_error("Cannot add watch to the directory");
+        }
+        m_wds.push_back(wd);
+    }
+
+    void SetCallback(const std::function< void(const std::string) > callback) {
+        m_fn = callback;
+    }
+
+    void RunWatcher () {
+        auto loop = [this]()
+        {
+            const size_t MAX_EVENTS = 1024;
+            const size_t EVENT_SIZE = sizeof(inotify_event) + NAME_MAX;
+            const size_t BUFF_SIZE = MAX_EVENTS * EVENT_SIZE;
+            auto buf = std::make_unique<char[]>(BUFF_SIZE);
+            char* buffer = buf.get();
+    /*
+    The file 1 was created with wd 1
+    The file 1 was deleted with wd 1
+    */
+            while (true) {
+                int size = read(m_fd, buffer, BUFF_SIZE);
+
+                int i = 0;
+                while(i < size) {
+                    inotify_event* event = (inotify_event*)&buffer[i];
+                    if ( event->len ) {
+                        if ( event->mask & IN_DELETE) {
+                            if (event->mask & IN_ISDIR)
+                                std::cout << format("The directory %s was deleted\n", event->name);
+                            else 
+                                std::cout << format("The file %s was deleted with wd %d\n", event->name, event->wd);
+                        }
+                        if ( event->mask & IN_CREATE) {
+                            if (event->mask & IN_ISDIR)
+                                std::cout << format("The directory %s was created\n", event->name);
+                            else {
+                                std::cout << format("The file %s was created with wd %d\n", event->name, event->wd);
+                                m_fn(event->name);
+                            }
+                        }
+                        if ( event->mask & IN_MODIFY) {
+                            if (event->mask & IN_ISDIR)
+                                std::cout << format("The directory %s was modified\n", event->name);
+                            else {
+                                std::cout << format("The file %s was modified with wd %d\n", event->name, event->wd);
+                                m_fn(event->name);
+                            }
+                        }
+                        i += sizeof(inotify_event) + event->len;
+                    }
+
+                }
+            }
+        };
+        std::thread watchThread(loop);
+        watchThread.detach();
+    }
+
+private:
+
+    std::function< void(const std::string) > m_fn;
+    int m_fd;
+    std::list<int> m_wds;
+};
+
+class Application : public Watcher {
 
     public:
 
@@ -102,15 +192,31 @@ class Application {
             m_workerTreads.reset(new ThreadPool(threadsCount, threadQeueSize));
             init_crc_table();
 
-            initWatcher();
+            auto callback_fn = [this](const std::string& path)
+            {
+                if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, path, true) )) {
+                    syslog(LOG_ERR, "ThreadPool queue is full");
+                    std::cerr << "ThreadPool queue is full\n";
+                }
+            };
+            SetCallback(callback_fn);
+            AddWatch(dir);
         }
+
+        Application operator=(const Application&) = delete;
 
         // TODO file statuses? large files, billion files
         void HandleEvent(bool init=false) 
         {
             for (const auto& entry : fs::recursive_directory_iterator(m_directory)) {
-                if (!entry.is_regular_file())
-                    continue;
+                if (!entry.is_regular_file()) {
+                    if (entry.is_directory()) {
+                        AddWatch(entry.path());
+                    }
+                    else {
+                        continue;
+                    }
+                }
 
                 if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, entry.path(), init) )) {
                     syslog(LOG_ERR, "ThreadPool queue is full");
@@ -139,7 +245,6 @@ class Application {
         void calculateCrc(const fs::path& filename, bool init) 
         {
             try {
-                uint32_t savedCrc;
                 std::unordered_map<fs::path, uint32_t>::const_iterator it;
                 {
                     // TODO: equal_range for hash collision
@@ -151,9 +256,6 @@ class Application {
                             throw std::runtime_error("new file");
                         }
                     }
-                    else {
-                        savedCrc = it->second;
-                    }
                 }
 
                 uint32_t crc;
@@ -161,13 +263,13 @@ class Application {
                 std::cout << format("%08x\t%s\n", crc, filename.c_str());
 
                 if (it != m_fileCrcMap.end()) {
-                    if (crc == savedCrc) {
+                    if (crc == it->second) {
                         // TODO: write one time
                         syslog(LOG_INFO, "Integrity check: OK");
                     }
                     else {
                         throw std::runtime_error(
-                            format("CRC mismatch: expected %08x  actual %08x", savedCrc, crc) );
+                            format("CRC mismatch: expected %08x  actual %08x", it->second, crc) );
                     }
                 }
                 else if (init) {
@@ -178,68 +280,6 @@ class Application {
             catch (const std::exception& e) {
                 syslog(LOG_ERR, "Integrity check: FAIL (%s - %s)", filename.c_str(), e.what());
             }
-        }
-
-        void initWatcher()
-        {
-            int fd = inotify_init();
-
-            if ( fd < 0 ) {
-                throw std::runtime_error("Cannot initialize inotify");
-            }
-
-            // TODO IN_CLOSE_WRITE on each file?
-            // TODO on each subdirectory
-            int wd = inotify_add_watch(fd, m_directory.c_str(), IN_DELETE | IN_CREATE | IN_MODIFY);
-            if ( wd < 0 ) {
-                throw std::runtime_error("Cannot add watch to the directory");
-            }
-
-            auto loop = [fd, wd]()
-            {
-                const size_t MAX_EVENTS = 1024;
-                const size_t EVENT_SIZE = sizeof(inotify_event) + PATH_MAX;
-                const size_t BUFF_SIZE = MAX_EVENTS * EVENT_SIZE;
-                auto buf = std::make_unique<char[]>(BUFF_SIZE);
-                char* buffer = buf.get();
-
-                while (true) {
-                    int size = read(fd, buffer, BUFF_SIZE);
-
-                    int i = 0;
-                    while(i < size) {
-                        inotify_event* event = (inotify_event*)&buffer[i];
-                        if ( event->len ) {
-                            if ( event->mask & IN_DELETE) {
-                                if (event->mask & IN_ISDIR)
-                                    std::cout << format("The directory %s was deleted\n", event->name);
-                                else
-                                    std::cout << format("The file %s was deleted with wd %d\n", event->name, event->wd);
-                            }
-                            if ( event->mask & IN_CREATE) {
-                                if (event->mask & IN_ISDIR)
-                                    std::cout << format("The directory %s was created\n", event->name);
-                                else
-                                    std::cout << format("The file %s was created with wd %d\n", event->name, event->wd);
-                            }
-                            if ( event->mask & IN_MODIFY) {
-                                if (event->mask & IN_ISDIR)
-                                    std::cout << format("The directory %s was modified\n", event->name);
-                                else
-                                    std::cout << format("The file %s was modified with wd %d\n", event->name, event->wd);
-                            }
-                            i += sizeof(inotify_event) + event->len;
-                        }
-
-                    }
-                }
-
-                inotify_rm_watch( fd, wd );
-                close( fd );
-            };
-
-            std::thread watchThread(loop);
-            watchThread.detach();
         }
 
         const fs::path m_directory;
@@ -308,6 +348,7 @@ int main(int argc, char** argv) {
 
         auto app = std::make_unique<Application>(directory, worker_threads, queue_size);
         app->HandleEvent(true);
+        app->RunWatcher();
 
         PeriodicTask crcUpdateTask(period, std::bind(&Application::HandleEvent, app.get(), false));
 
