@@ -209,10 +209,10 @@ int main(int argc, char** argv) {
     desc.add_options()
         ("help,h", "Show help")
         ("daemonize,d", "daemonize")
-        ("dir,D", po::value< std::string >(&directory)->default_value(""), "The directory to monitore, can be setted by CRC_SCAN_DIRECTORY environment variable")
+        ("dir,D", po::value< std::string >(&directory)->default_value(""), "The directory to monitore, may be setted by CRC_SCAN_DIRECTORY environment variable")
         ("worker_threads,T", po::value< int >( &worker_threads )->default_value(0), "Number of worker threads used for crc check, 0 - auto")
         ("queue,Q", po::value< int >(&queue_size)->default_value(100000), "Size of files queue")
-        ("period,P", po::value< int >( &period )->default_value(0), "Recalculating period, in seconds");
+        ("period,P", po::value< int >( &period )->default_value(0), "Recalculating period in seconds, may be setted by CRC_SCAN_DIRECTORY_PERIOD environment variable");
 
 
     try
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
 
         if (vm.count("daemonize")) {
              // daemon(nochdir, noclose)
-            if( daemon(0, 0) != 0 ) {
+            if( daemon(1, 0) != 0 ) {
                 std::cerr << "Failed to daemonize " << argv[0] << " process: " << strerror(errno) << std::endl;
                 return 2;
             }
