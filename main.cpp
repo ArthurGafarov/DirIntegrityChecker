@@ -99,8 +99,8 @@ public:
     Watcher operator=(const Watcher&) = delete;
 
     ~Watcher() {
-        for (auto& wd: m_wds) {
-            inotify_rm_watch( m_fd, wd );
+        for (auto& wd: m_wdDirMap) {
+            inotify_rm_watch( m_fd, wd.first );
         }
         close( m_fd );
     }
@@ -110,7 +110,7 @@ public:
         if ( wd < 0 ) {
             throw std::runtime_error("Cannot add watch to the directory");
         }
-        m_wds.push_back(wd);
+        m_wdDirMap[wd] = path;
     }
 
     void SetCallback(const std::function< void(const std::string) > callback) {
@@ -125,10 +125,35 @@ public:
             const size_t BUFF_SIZE = MAX_EVENTS * EVENT_SIZE;
             auto buf = std::make_unique<char[]>(BUFF_SIZE);
             char* buffer = buf.get();
-    /*
-    The file 1 was created with wd 1
-    The file 1 was deleted with wd 1
-    */
+
+            auto handle_event = [this](const inotify_event* event)
+            {
+                const std::string path = format("%s/%s", m_wdDirMap[event->wd].c_str(), event->name);
+
+                if ( event->mask & IN_DELETE) {
+                    if (event->mask & IN_ISDIR)
+                        syslog(LOG_ERR, "Integrity check: FAIL (%s - the directory was removed)", path.c_str());
+                    else 
+                        syslog(LOG_ERR, "Integrity check: FAIL (%s - the file was removed)", path.c_str());
+                }
+                if ( event->mask & IN_CREATE) {
+                    if (event->mask & IN_ISDIR)
+                        syslog(LOG_INFO, "The directory %s was created", path.c_str());
+                    else {
+                        syslog(LOG_INFO, "The file %s was created, recalculating", path.c_str());
+                        m_fn(path);
+                    }
+                }
+                if ( event->mask & IN_MODIFY) {
+                    if (event->mask & IN_ISDIR)
+                        syslog(LOG_INFO, "The directory %s was modified", path.c_str());
+                    else {
+                        syslog(LOG_INFO, "The file %s was modified, recalculating", path.c_str());
+                        m_fn(path);
+                    }
+                }
+            };
+
             while (true) {
                 int size = read(m_fd, buffer, BUFF_SIZE);
 
@@ -136,28 +161,7 @@ public:
                 while(i < size) {
                     inotify_event* event = (inotify_event*)&buffer[i];
                     if ( event->len ) {
-                        if ( event->mask & IN_DELETE) {
-                            if (event->mask & IN_ISDIR)
-                                std::cout << format("The directory %s was deleted\n", event->name);
-                            else 
-                                std::cout << format("The file %s was deleted with wd %d\n", event->name, event->wd);
-                        }
-                        if ( event->mask & IN_CREATE) {
-                            if (event->mask & IN_ISDIR)
-                                std::cout << format("The directory %s was created\n", event->name);
-                            else {
-                                std::cout << format("The file %s was created with wd %d\n", event->name, event->wd);
-                                m_fn(event->name);
-                            }
-                        }
-                        if ( event->mask & IN_MODIFY) {
-                            if (event->mask & IN_ISDIR)
-                                std::cout << format("The directory %s was modified\n", event->name);
-                            else {
-                                std::cout << format("The file %s was modified with wd %d\n", event->name, event->wd);
-                                m_fn(event->name);
-                            }
-                        }
+                        handle_event(event);
                         i += sizeof(inotify_event) + event->len;
                     }
 
@@ -172,7 +176,7 @@ private:
 
     std::function< void(const std::string) > m_fn;
     int m_fd;
-    std::list<int> m_wds;
+    std::unordered_map<int, std::string> m_wdDirMap;
 };
 
 class Application : public Watcher {
@@ -192,6 +196,7 @@ class Application : public Watcher {
             m_workerTreads.reset(new ThreadPool(threadsCount, threadQeueSize));
             init_crc_table();
 
+            // init Watcher
             auto callback_fn = [this](const std::string& path)
             {
                 if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, path, true) )) {
@@ -210,7 +215,7 @@ class Application : public Watcher {
         {
             for (const auto& entry : fs::recursive_directory_iterator(m_directory)) {
                 if (!entry.is_regular_file()) {
-                    if (entry.is_directory()) {
+                    if (entry.is_directory() && init) {
                         AddWatch(entry.path());
                     }
                     else {
