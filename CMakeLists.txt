@@ -15,6 +15,7 @@ add_executable(
     app/crc32.cpp
     app/periodic_task.cpp
     app/thread_pool_queue.cpp
+    app/watcher.cpp
 )
 
 target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES})
