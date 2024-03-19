@@ -87,6 +87,22 @@ inline std::string format(const std::string fmt, ...) {
 
 }
 
+// defer?
+class WaitGroup {
+public:
+    void Add(int incr = 1) { counter += incr; }
+    void Done() { if (--counter <= 0) cond.notify_all(); }
+    void Wait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        cond.wait(lock, [&] { return counter <= 0; });
+    }
+
+private:
+    std::mutex mutex;
+    std::atomic<int> counter;
+    std::condition_variable cond;
+};
+
 
 class Application : public Watcher {
 
@@ -108,6 +124,7 @@ class Application : public Watcher {
             // init Watcher
             auto callback_fn = [this](const std::string& path)
             {
+                m_waitGroup.Add();
                 if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, path, true) )) {
                     syslog(LOG_ERR, "ThreadPool queue is full");
                     std::cerr << "ThreadPool queue is full\n";
@@ -121,6 +138,8 @@ class Application : public Watcher {
 
         void HandleEvent(bool init=false) 
         {
+            m_ok.store(true);
+
             for (const auto& entry : fs::recursive_directory_iterator(m_directory)) {
                 if (!entry.is_regular_file()) {
                     // another rule of directory watching?
@@ -130,10 +149,17 @@ class Application : public Watcher {
                     continue;
                 }
 
+                m_waitGroup.Add();
                 if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, entry.path(), init) )) {
+                    m_waitGroup.Done();
                     syslog(LOG_ERR, "ThreadPool queue is full");
                     std::cerr << "ThreadPool queue is full\n";
                 }
+            }
+
+            m_waitGroup.Wait();
+            if (m_ok.load()) {
+                syslog(LOG_INFO, "Integrity check: OK");
             }
         }
 
@@ -173,11 +199,7 @@ class Application : public Watcher {
                 // std::cout << format("%08x\t%s\n", crc, filename.c_str());
 
                 if (it != m_fileCrcMap.end()) {
-                    if (crc == it->second) {
-                        // TODO: write one time
-                        syslog(LOG_INFO, "Integrity check: OK");
-                    }
-                    else {
+                    if (crc != it->second) {
                         throw std::runtime_error(
                             format("CRC mismatch: expected %08x  actual %08x", it->second, crc) );
                     }
@@ -186,8 +208,12 @@ class Application : public Watcher {
                     std::unique_lock lock(m_mutex);
                     m_fileCrcMap[filename] = crc;
                 }
+
+                m_waitGroup.Done();
             }
             catch (const std::exception& e) {
+                m_ok.store(false);
+                m_waitGroup.Done();
                 syslog(LOG_ERR, "Integrity check: FAIL (%s - %s)", filename.c_str(), e.what());
             }
         }
@@ -196,6 +222,8 @@ class Application : public Watcher {
         std::unique_ptr<ThreadPool> m_workerTreads;
         std::shared_mutex m_mutex;
         std::unordered_map<fs::path, uint32_t> m_fileCrcMap;
+        WaitGroup m_waitGroup;
+        std::atomic<bool> m_ok;
 };
 
 // TODO systemd script?
