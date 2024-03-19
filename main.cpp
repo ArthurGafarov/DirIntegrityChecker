@@ -119,17 +119,15 @@ class Application : public Watcher {
 
         Application operator=(const Application&) = delete;
 
-        // TODO file statuses? large files, billion files
         void HandleEvent(bool init=false) 
         {
             for (const auto& entry : fs::recursive_directory_iterator(m_directory)) {
                 if (!entry.is_regular_file()) {
+                    // another rule of directory watching?
                     if (entry.is_directory() && init) {
                         AddWatch(entry.path());
                     }
-                    else {
-                        continue;
-                    }
+                    continue;
                 }
 
                 if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, entry.path(), init) )) {
@@ -154,19 +152,17 @@ class Application : public Watcher {
 
     private:
 
-        // TODO separate ScanDir and CheckDir (write and read)
-
+        // TODO may be its better to split the func to separate ScanDir and CheckDir (write and read)
         void calculateCrc(const fs::path& filename, bool init) 
         {
             try {
                 std::unordered_map<fs::path, uint32_t>::const_iterator it;
                 {
                     // TODO: equal_range for hash collision
-                    std::lock_guard lock(m_mutex); // std::shared_lock
+                    std::shared_lock lock(m_mutex);
                     it = m_fileCrcMap.find(filename);
                     if (it == m_fileCrcMap.end()) {
                         if (!init) {
-                            // TODO: new file or delete file, inotify?
                             throw std::runtime_error("new file");
                         }
                     }
@@ -174,7 +170,7 @@ class Application : public Watcher {
 
                 uint32_t crc;
                 calc_crc(filename.c_str(), &crc);
-                std::cout << format("%08x\t%s\n", crc, filename.c_str());
+                // std::cout << format("%08x\t%s\n", crc, filename.c_str());
 
                 if (it != m_fileCrcMap.end()) {
                     if (crc == it->second) {
@@ -187,7 +183,7 @@ class Application : public Watcher {
                     }
                 }
                 else if (init) {
-                    std::lock_guard lock(m_mutex); // std::unique_lock
+                    std::unique_lock lock(m_mutex);
                     m_fileCrcMap[filename] = crc;
                 }
             }
@@ -198,7 +194,7 @@ class Application : public Watcher {
 
         const fs::path m_directory;
         std::unique_ptr<ThreadPool> m_workerTreads;
-        std::mutex m_mutex; // std::shared_mutex
+        std::shared_mutex m_mutex;
         std::unordered_map<fs::path, uint32_t> m_fileCrcMap;
 };
 
@@ -207,7 +203,7 @@ int main(int argc, char** argv) {
     stacktrace::registerHandlers();
 
     std::string directory;
-    int worker_threads, period, queue_size; // TODO check for too small period in large dir
+    int worker_threads, period, queue_size; // TODO too small period for a large dir queue management?
 
     po::options_description desc("Program options");
     desc.add_options()
@@ -233,7 +229,7 @@ int main(int argc, char** argv) {
 
         if (vm.count("daemonize")) {
              // daemon(nochdir, noclose)
-            if( daemon(0, 1) != 0 ) {
+            if( daemon(0, 0) != 0 ) {
                 std::cerr << "Failed to daemonize " << argv[0] << " process: " << strerror(errno) << std::endl;
                 return 2;
             }
@@ -251,7 +247,7 @@ int main(int argc, char** argv) {
             period = std::atoi(periodStr.c_str());
             if (!period) {
                 period = 60;
-                syslog(LOG_INFO, "period was set for one minute");
+                syslog(LOG_INFO, "period was set to one minute");
             }
         }
 
