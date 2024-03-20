@@ -1,21 +1,14 @@
 #include <boost/program_options.hpp>
-#include <cstdarg>
-#include <filesystem>
-#include <shared_mutex>
 #include <stdint.h>
 #include <sys/inotify.h>
 #include <syslog.h>
 
-#include "app/crc32.h"
-#include "app/defer.h"
+#include "app/dir_scanner.h"
 #include "app/periodic_task.h"
 #include "app/signal_handlers.h"
-#include "app/thread_pool.h"
-#include "app/waitgroup.h"
-#include "app/watcher.h"
 
 namespace po = boost::program_options;
-namespace fs = std::filesystem;
+
 
 /*
 Написать демон, выполняющий контроль целостности (crc32) файлов.
@@ -54,166 +47,26 @@ namespace fs = std::filesystem;
 - Сохранить в файле результат расчета чек-сумм файлов в JSON-формате:
 */
 
-/* TODO:
-python json inotify,
+/* TODO
+json: extend map by statuses struct and write it to the file
+python (what to test?)
+fork (why to fork?)
 */
+
 namespace {
-
-inline std::string get_env(const std::string &var)
-{
-    const char * val = std::getenv(var.c_str());
-    if ( !val )
-        return std::string();
-    else
-        return std::string(val);
+    inline std::string get_env(const std::string &var)
+    {
+        const char * val = std::getenv(var.c_str());
+        if ( !val )
+            return std::string();
+        else
+            return std::string(val);
+    }
 }
 
 
-#define MAX_PATH_LEN = PATH_MAX
-inline std::string format(const std::string fmt, ...) {
-    va_list argL;
-    va_start(argL, fmt);
-    int len = vsnprintf(nullptr, 0, fmt.c_str(), argL);
-    va_end(argL);
 
-    std::string str(len, '\0');
-
-    va_start(argL, fmt);
-    vsnprintf(str.data(), len + 1, fmt.c_str(), argL);
-    va_end(argL);
-
-    return str;
-}
-
-}
-
-
-class Application : public Watcher {
-
-    public:
-
-        Application(const std::string& dir, int threadsCount, int threadQeueSize)
-            : m_directory(dir)
-        {
-            if (!fs::exists(m_directory)) {
-                throw std::runtime_error(format("\"%s\" not exists", m_directory.c_str()));
-            }
-            if (!fs::is_directory(m_directory)) {
-                throw std::runtime_error(format("\"%s\" is not a directory", m_directory.c_str()));
-            }
-
-            m_workerTreads.reset(new ThreadPool(threadsCount, threadQeueSize));
-            init_crc_table();
-
-            // init Watcher
-            auto callback_fn = [this](const std::string& path)
-            {
-                m_waitGroup.Add();
-                if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, path, true) )) {
-                    syslog(LOG_ERR, "ThreadPool queue is full");
-                    std::cerr << "ThreadPool queue is full\n";
-                }
-            };
-            SetCallback(callback_fn);
-            AddWatch(dir);
-        }
-
-        Application operator=(const Application&) = delete;
-
-        void HandleEvent(bool init=false) 
-        {
-            m_ok.store(true);
-
-            for (const auto& entry : fs::recursive_directory_iterator(m_directory)) {
-                if (!entry.is_regular_file()) {
-                    // another rule of directory watching?
-                    if (entry.is_directory() && init) {
-                        AddWatch(entry.path());
-                    }
-                    continue;
-                }
-
-                m_waitGroup.Add();
-                if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, entry.path(), init) )) {
-                    m_waitGroup.Done();
-                    syslog(LOG_ERR, "ThreadPool queue is full");
-                    std::cerr << "ThreadPool queue is full\n";
-                }
-            }
-
-            m_waitGroup.Wait();
-            if (m_ok.load()) {
-                syslog(LOG_INFO, "Integrity check: OK");
-            }
-        }
-
-#ifdef COMPILE_UNUSED_FUNC
-        void CheckDir()
-        {
-            for (const auto& [filename, savedCrc]: m_fileCrcMap) {
-                if (!fs::exists(filename)) {
-                    syslog(LOG_ERR, "Integrity check: FAIL (%s - removed)", filename.c_str());
-                }
-                if (!m_workerTreads->addTask( std::bind(&Application::calculateCrc, this, filename, false) )) {
-                    syslog(LOG_ERR, "ThreadPool queue is full");
-                    std::cerr << "ThreadPool queue is full\n";
-                }
-            }
-        }
-#endif
-
-    private:
-
-        // TODO may be its better to split the func to separate ScanDir and CheckDir (write and read)
-        void calculateCrc(const fs::path& filename, bool init) 
-        {
-            Defer doOnScopeExit(
-                [this]() { m_waitGroup.Done(); } );
-
-            try {
-                std::unordered_map<fs::path, uint32_t>::const_iterator it;
-                {
-                    // TODO: equal_range for hash collision
-                    std::shared_lock lock(m_mutex);
-                    it = m_fileCrcMap.find(filename);
-                    if (it == m_fileCrcMap.end()) {
-                        if (!init) {
-                            throw std::runtime_error("new file");
-                        }
-                    }
-                }
-
-                uint32_t crc;
-                calc_crc(filename.c_str(), &crc);
-                // std::cout << format("%08x\t%s\n", crc, filename.c_str());
-
-                if (it != m_fileCrcMap.end()) {
-                    if (crc != it->second) {
-                        throw std::runtime_error(
-                            format("CRC mismatch: expected %08x  actual %08x", it->second, crc) );
-                    }
-                }
-                else if (init) {
-                    std::unique_lock lock(m_mutex);
-                    m_fileCrcMap[filename] = crc;
-                }
-            }
-            catch (const std::exception& e) {
-                m_ok.store(false);
-                syslog(LOG_ERR, "Integrity check: FAIL (%s - %s)", filename.c_str(), e.what());
-            }
-        }
-
-        const fs::path m_directory;
-        std::unique_ptr<ThreadPool> m_workerTreads;
-        std::shared_mutex m_mutex;
-        std::unordered_map<fs::path, uint32_t> m_fileCrcMap;
-        // ATTENTION! possible deadlock or race condition, Done() MUST be called for each Add() to use Wait() to obtain a common status
-        WaitGroup m_waitGroup;
-        std::atomic<bool> m_ok;
-};
-
-// TODO systemd script?
+// TODO: systemd script or it's mean to be a daemon()?
 int main(int argc, char** argv) {
     stacktrace::registerHandlers();
 
@@ -271,11 +124,11 @@ int main(int argc, char** argv) {
         }
 
 
-        auto app = std::make_unique<Application>(directory, worker_threads, queue_size);
-        app->HandleEvent(true);
+        auto app = std::make_unique<DirScanner>(directory, worker_threads, queue_size);
+        app->Scan(true);
         app->RunWatcher();
 
-        PeriodicTask crcUpdateTask(period, std::bind(&Application::HandleEvent, app.get(), false));
+        PeriodicTask crcUpdateTask(period, std::bind(&DirScanner::Scan, app.get(), false));
 
         bool sStop = false;
         do {
@@ -288,7 +141,7 @@ int main(int argc, char** argv) {
                     sStop = true;
                     break;
                 case SIGUSR1:
-                    app->HandleEvent();
+                    app->Scan();
                     break;
                 default:
                     break;

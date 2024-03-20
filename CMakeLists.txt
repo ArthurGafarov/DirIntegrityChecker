@@ -13,6 +13,7 @@ add_executable(
     ${PROJECT_NAME}
     main.cpp
     app/crc32.cpp
+    app/dir_scanner.cpp
     app/periodic_task.cpp
     app/thread_pool_queue.cpp
     app/watcher.cpp
