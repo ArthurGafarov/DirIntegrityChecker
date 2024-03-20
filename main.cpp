@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
         ("daemonize,d", "daemonize")
         ("dir,D", po::value< std::string >(&directory)->default_value(""), "The directory to monitore, may be setted by CRC_SCAN_DIRECTORY environment variable")
         ("worker_threads,T", po::value< int >( &worker_threads )->default_value(0), "Number of worker threads used for crc check, 0 - auto")
-        ("queue,Q", po::value< int >(&queue_size)->default_value(100000), "Size of files queue")
+        ("queue,Q", po::value< int >(&queue_size)->default_value(1000000), "Size of files queue")
         ("period,P", po::value< int >( &period )->default_value(0), "Recalculating period in seconds, may be setted by CRC_SCAN_DIRECTORY_PERIOD environment variable");
 
 
