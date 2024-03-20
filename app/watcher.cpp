@@ -24,6 +24,7 @@ Watcher::~Watcher() {
 }
 
 void Watcher::AddWatch(const std::string& path) {
+    // IN_MODIFY invokes an event twice, so IN_CLOSE_WRITE is used
     int wd = inotify_add_watch(m_fd, path.c_str(), IN_DELETE | IN_CREATE | IN_CLOSE_WRITE);
     if ( wd < 0 ) {
         throw std::runtime_error("Cannot add watch to the directory");
