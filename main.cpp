@@ -1,20 +1,18 @@
-#include <iostream>
-#include <filesystem>
 #include <boost/program_options.hpp>
-#include <stdint.h>
 #include <cstdarg>
-#include <syslog.h>
-#include <sys/inotify.h>
+#include <filesystem>
 #include <shared_mutex>
-#include <list>
+#include <stdint.h>
+#include <sys/inotify.h>
+#include <syslog.h>
 
-#include "app/stacktrace.h"
-#include "app/thread_pool.h"
 #include "app/crc32.h"
-#include "app/periodic_task.h"
-#include "app/watcher.h"
-#include "app/waitgroup.h"
 #include "app/defer.h"
+#include "app/periodic_task.h"
+#include "app/signal_handlers.h"
+#include "app/thread_pool.h"
+#include "app/waitgroup.h"
+#include "app/watcher.h"
 
 namespace po = boost::program_options;
 namespace fs = std::filesystem;

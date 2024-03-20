@@ -1,5 +1,4 @@
-#ifndef STACKTRACE
-#define STACKTRACE
+#pragma once
 
 #include <iostream>
 #include <csignal>
@@ -61,12 +60,10 @@ void registerHandlers()
     signal(SIGQUIT, SIG_IGN);
     signal(SIGINT, SIG_IGN);
     signal(SIGHUP, SIG_IGN);
-    signal(SIGSTOP, SIG_IGN);
-    signal(SIGCONT, SIG_IGN);
+    // signal(SIGSTOP, SIG_IGN); // uncathcable
+    signal(SIGCONT, SIG_IGN); // why we should stub SIGCONT if SIGSTOP acts as usual?
 
     std::set_terminate(terminateHandler);
 }
 
 }
-
-#endif //STACKTRACE
