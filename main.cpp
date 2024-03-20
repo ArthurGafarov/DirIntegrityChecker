@@ -13,6 +13,8 @@
 #include "app/crc32.h"
 #include "app/periodic_task.h"
 #include "app/watcher.h"
+#include "app/waitgroup.h"
+#include "app/defer.h"
 
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
@@ -87,22 +89,6 @@ inline std::string format(const std::string fmt, ...) {
 
 }
 
-// defer?
-class WaitGroup {
-public:
-    void Add(int incr = 1) { counter += incr; }
-    void Done() { if (--counter <= 0) cond.notify_all(); }
-    void Wait() {
-        std::unique_lock<std::mutex> lock(mutex);
-        cond.wait(lock, [&] { return counter <= 0; });
-    }
-
-private:
-    std::mutex mutex;
-    std::atomic<int> counter;
-    std::condition_variable cond;
-};
-
 
 class Application : public Watcher {
 
@@ -163,6 +149,7 @@ class Application : public Watcher {
             }
         }
 
+#ifdef COMPILE_UNUSED_FUNC
         void CheckDir()
         {
             for (const auto& [filename, savedCrc]: m_fileCrcMap) {
@@ -175,12 +162,16 @@ class Application : public Watcher {
                 }
             }
         }
+#endif
 
     private:
 
         // TODO may be its better to split the func to separate ScanDir and CheckDir (write and read)
         void calculateCrc(const fs::path& filename, bool init) 
         {
+            Defer doOnScopeExit(
+                [this]() { m_waitGroup.Done(); } );
+
             try {
                 std::unordered_map<fs::path, uint32_t>::const_iterator it;
                 {
@@ -208,12 +199,9 @@ class Application : public Watcher {
                     std::unique_lock lock(m_mutex);
                     m_fileCrcMap[filename] = crc;
                 }
-
-                m_waitGroup.Done();
             }
             catch (const std::exception& e) {
                 m_ok.store(false);
-                m_waitGroup.Done();
                 syslog(LOG_ERR, "Integrity check: FAIL (%s - %s)", filename.c_str(), e.what());
             }
         }
@@ -222,6 +210,7 @@ class Application : public Watcher {
         std::unique_ptr<ThreadPool> m_workerTreads;
         std::shared_mutex m_mutex;
         std::unordered_map<fs::path, uint32_t> m_fileCrcMap;
+        // ATTENTION! possible deadlock or race condition, Done() MUST be called for each Add() to use Wait() to obtain a common status
         WaitGroup m_waitGroup;
         std::atomic<bool> m_ok;
 };
