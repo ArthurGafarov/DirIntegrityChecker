@@ -6,14 +6,13 @@
 #include <condition_variable>
 #include <vector>
 #include <atomic>
-#include "join_threads.h"
 #include "thread_pool_queue.h"
 
 class ThreadPool
 {
 public:
 
-    ThreadPool(int threads, int queue_size):m_done(false), m_tasks(queue_size), m_joiner(m_threads)
+    ThreadPool(int threads, int queue_size):m_done(false), m_tasks(queue_size)
     {
         try
         {
@@ -57,7 +56,6 @@ private:
 
     ThreadPoolQueue m_tasks;
     std::vector< std::thread > m_threads;
-    JoinThreads m_joiner;
 
     void worker()
     {
