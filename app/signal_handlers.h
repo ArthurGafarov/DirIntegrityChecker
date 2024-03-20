@@ -1,12 +1,36 @@
 #pragma once
 
+#include "format.h"
+
 #include <iostream>
 #include <csignal>
+#include <execinfo.h>
 
+/*
 #define BOOST_STACKTRACE_USE_ADDR2LINE
 #include <boost/stacktrace.hpp>
-
+*/
 namespace stacktrace {
+
+// no boost version
+#define STACK_TRACE_BUFFER_SIZE 500
+void _print_stacktrace()
+{
+    void* buffer[STACK_TRACE_BUFFER_SIZE];
+    int bt_size = backtrace(buffer, STACK_TRACE_BUFFER_SIZE);
+    char** bt_messages = backtrace_symbols(buffer, bt_size);
+    if (bt_messages == NULL) {
+        std::cout << "CRITICAL ERROR: backtrace_symbols is NULL\n";
+        exit(EXIT_FAILURE);
+    }
+    std::string bt_formatted;
+    for (int frame = 0; frame < bt_size; frame++) {
+        bt_formatted += string::format(
+            "\n[bt]: (%d) %s", frame, bt_messages[frame]);
+    }
+    std::cout << string::format("Backtrace returned %d frames:\n%s", bt_size, bt_formatted.c_str());
+    free(bt_messages);
+}
 
 void terminateHandler()
 {
@@ -26,7 +50,8 @@ void terminateHandler()
     else {
             std::cout << "CRITICAL ERROR      Terminated due to unknown reason" << std::endl;
     }
-    std::cout << boost::stacktrace::stacktrace() << std::endl;
+    // std::cout << boost::stacktrace::stacktrace() << std::endl;
+    _print_stacktrace();
     std::abort();
 }
 
@@ -44,7 +69,8 @@ void signalHandler(int signal)
             std::stringstream ss;
             ss << "CRITICAL ERROR      Aborting due to signal #";
             ss << signal << ": " << strsignal(signal) << '\n';
-            ss << boost::stacktrace::stacktrace();
+            //ss << boost::stacktrace::stacktrace();
+            _print_stacktrace();
 
             std::cout << ss.str() << std::endl;
             std::abort();
@@ -60,8 +86,8 @@ void registerHandlers()
     signal(SIGQUIT, SIG_IGN);
     signal(SIGINT, SIG_IGN);
     signal(SIGHUP, SIG_IGN);
-    // signal(SIGSTOP, SIG_IGN); // uncathcable
-    signal(SIGCONT, SIG_IGN); // why we should stub SIGCONT if SIGSTOP acts as usual?
+    // signal(SIGSTOP, SIG_IGN); // uncathable
+    signal(SIGCONT, SIG_IGN); // why should we  stub SIGCONT if SIGSTOP acts as usual?
 
     std::set_terminate(terminateHandler);
 }

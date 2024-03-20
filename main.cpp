@@ -1,5 +1,4 @@
 #include <boost/program_options.hpp>
-#include <stdint.h>
 #include <sys/inotify.h>
 #include <syslog.h>
 
