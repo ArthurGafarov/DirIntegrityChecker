@@ -63,6 +63,7 @@ void signalHandler(int signal)
     {
         case SIGTERM:
         case SIGUSR1:
+        case SIGUSR2:
             g_signal = signal;
             break;
         default:
@@ -81,6 +82,7 @@ void registerHandlers()
 {
     signal(SIGTERM, signalHandler);
     signal(SIGUSR1, signalHandler);
+    signal(SIGUSR2, signalHandler);
     signal(SIGSEGV, signalHandler);
 
     signal(SIGQUIT, SIG_IGN);

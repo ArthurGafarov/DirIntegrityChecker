@@ -29,11 +29,13 @@ DirScanner::DirScanner(const std::string& dir, int threadsCount, int threadQeueS
     {
         m_waitGroup.Add();
         if (!m_workerTreads->addTask( std::bind(&DirScanner::calculateCrc, this, path, true) )) {
+            m_waitGroup.Done();
             syslog(LOG_ERR, "ThreadPool queue is full");
             std::cerr << "ThreadPool queue is full\n";
         }
     };
     SetCallback(callback_fn);
+    // TODO: callback for statuses NEW and ABSENT
     AddWatch(dir);
 }
 
@@ -70,15 +72,42 @@ void DirScanner::Save(const std::string& filename) {
     if (!ofs.good()) {
         throw std::runtime_error(string::format("Unable to open %s", filename.c_str()));
     }
+    auto get_status = [](const file_status& s)
+    {
+        switch(s) {
+            case file_status::OK:
+                return "OK";
+            case file_status::FAIL:
+                return "FAIL";
+            case file_status::NEW:
+                return "NEW";
+            case file_status::ABSENT:
+                return "ABSENT";
+            default:
+                return "UNKNOWN";
+        }
+    };
+
+    std::shared_lock lock(m_mutex);
+    size_t filesNumber = m_fileCrcMap.size();
+    size_t counter = 0;
     ofs << "[\n";
     for (const auto& [path, info]: m_fileCrcMap) {
-        ofs << string::format("{ \"path\": \"%s\", \"etalon_crc32\": \"0X%08X\", \"result_crc32\": \"0X%08X\", \"status\": %d},\n", path.c_str(), info.etalon_crc32, info.result_crc32, info.status);
+        if (++counter != filesNumber) {
+            ofs << string::format(
+                "{ \"path\": \"%s\", \"etalon_crc32\": \"0X%08X\", \"result_crc32\": \"0X%08X\", \"status\": \"%s\"},\n",
+                path.c_str(), info.etalon_crc32, info.result_crc32, get_status(info.status) );
+        }
+        else { // last entry
+            ofs << string::format(
+                "{ \"path\": \"%s\", \"etalon_crc32\": \"0X%08X\", \"result_crc32\": \"0X%08X\", \"status\": \"%s\"}\n]",
+                path.c_str(), info.etalon_crc32, info.result_crc32, get_status(info.status) );
+        }
     }
-    ofs << "\n]";
 }
 
 
-// TODO its maybe better to split the func to separate read and write
+// TODO separate read and write?
 void DirScanner::calculateCrc(const fs::path& filename, bool save) 
 {
     Defer doOnScopeExit(

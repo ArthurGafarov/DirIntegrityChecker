@@ -142,6 +142,9 @@ int main(int argc, char** argv) {
                 case SIGUSR1:
                     app->Scan();
                     break;
+                case SIGUSR2:
+                    app->Save("result.json");
+                    break;
                 default:
                     break;
             }
